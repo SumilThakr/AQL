@@ -1,0 +1,6 @@
+scenario,pasturelu,pasturelu_minus,forestlu,croplu,croplu_minus
+highcrop,0,-1050,772,4559,0
+nineties,0,-715,1348,0,-1490
+forest,0,-261,1904,0,-1814
+urban,51,0,277,590,0
+natl,129,0,118,0,-1026
