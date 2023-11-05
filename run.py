@@ -5,6 +5,7 @@ import numpy as np
 # set working directory
 os.chdir(".")
 
+
 #########################################################################
 ########################### LAND USE CHANGES ############################
 #########################################################################
@@ -77,9 +78,14 @@ m['fert-ef']        = m['fert-ef'].replace(np.nan, 0.078)
 # 1 lb/acre         = 0.453592 / 0.00404686
 c                   = 0.453592/0.00404686
 # Get NH3 emissions in kg-NH3/km² from fertilizer and manure by county:
-m['emis']           = (m['FarmLbsN_perAc'] * m['fert-ef'] * c) + ((m['RecLbsN_perAc']) * 0.305 * c)
+m['emis']           = (m['FarmLbsN_perAc'] * m['fert-ef'] * c) + ((m['RecLbsN_perAc']) * 0.305 * c) 
 # m['emis'] is ready to be multiplied by crop areas in km² for each
 # scenario to get emissions.
+
+# Pasture also takes manure emissions.
+# 0.59 is from FAO: manure left on pasture as a fraction of total manure
+# (left on pasture + applied to soils)
+m['pastureemis']           = ((m['RecLbsN_perAc']) * 0.305 * c * 0.59)
 
 # 2. Dust PM2.5 emissions
 # Agricultural dust emissions are largely from tilling and harvest
@@ -169,6 +175,39 @@ grassnox            = cmass * 89.3 / (1000000 * 0.937)
 forestnox           = cmass * 16.3 / (1000000 * 2.344)
 
 #########################################################################
+####################### WINDBLOWN DUST  EMISSIONS #######################
+#########################################################################
+
+# Windblown dust emissions are derived from the following study:
+# Mansell, G., et al. "Fugitive Wind Blown Dust Emissions and Model
+# Performance Evaluation–Phase II." ENVIRON International Corporation,
+# Novato California and University of California at Riverside. May.
+# http://www.wrapair.org/forums/dejf/documents/WRAP_WBD_PhaseII_Final_Report_05
+# 506 (2006).
+
+# We use a PM2.5/PM10 ratio of 0.15, as recommended by EPA in the following
+# source:
+# https://www.epa.gov/sites/default/files/2020-10/documents/
+#background_document_for_revisions_to_fine_fraction_ratios_used_for_ap-42_fugitive_dust_emission.pdf
+
+# We convert to kg-PM2.5/ha for each state for each land-use class. We assume
+# that "Agricultural" land corresponds to cropland, and "Grasslands"
+# corresponds to pasture and rangeland.
+
+wbddf               = pixels[['GEOID']]
+wbddf               = wbddf.rename(columns={'GEOID': 'FIPS'})
+
+wbdust              = pd.read_csv("inputs/efs/wbdustef.csv")
+# Get averages of emission factors:
+wb_ag_avg           = wbdust['Agricultural'].mean()
+wb_grass_avg        = wbdust['Grasslands'].mean()
+wbdust['SFIPS']     = wbdust['SFIPS'].astype(int) * 1000
+wbddf['SFIPS']     = (np.floor(wbddf['FIPS']/1000)*1000).astype(int)
+wbdust              = pd.merge(wbdust,wbddf,on='SFIPS', how='right')
+wbdust['Agricultural'].replace(to_replace = np.nan, value = wb_ag_avg, inplace=True)
+wbdust['Grasslands'].replace(to_replace = np.nan, value = wb_grass_avg, inplace=True)
+
+#########################################################################
 ######################## NEW BIOGENIC  EMISSIONS ########################
 #########################################################################
 
@@ -204,14 +243,14 @@ bvoc                = pd.read_csv("./inputs/bvoc/bvoc-county.csv")
 # compare the results to existing literature.
 
 # County-specific emission factors are merged by FIPS with pixels['GEOID'].
-# First, rename columns:
+# Rename columns
 pixels              = pixels.rename(columns={'GEOID': 'FIPS'})
 m                   = m.rename(columns={'emis': 'nh3-emis'})
 ers                 = ers.rename(columns={'emis': 'dust-emis'})
 
-# I only need FIPS and the areas for each scenario
+# Drop everything but FIPS and the areas for each scenario
 pixels              = pixels.iloc[:,[4,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38]]
-pixels              = pd.merge(pixels, m[['FIPS','nh3-emis']], on='FIPS', how='left')
+pixels              = pd.merge(pixels, m[['FIPS','nh3-emis','pastureemis']], on='FIPS', how='left')
 pixels              = pd.merge(pixels, ers[['FIPS','dust-emis']], on='FIPS', how='left')
 
 # Handle counties with no data
@@ -221,16 +260,21 @@ pixels['dust-emis'] = pixels['dust-emis'].replace(np.nan, pixels['dust-emis'].me
 # Getting total emissions for NLCD
 # 1. NH3
 nh3                 = (pixels['nlcd1'] * pixels['nh3-emis'])
-print("Total NH3 emissions:", nh3.sum() /1000000000, "Tg/yr")
+#print("Total NH3 emissions:", nh3.sum() /1000000000, "Tg/yr")
 totlanduse          = pixels['nlcd1'] + pixels['nlcd2'] + pixels['nlcd3'] + pixels['nlcd4'] + pixels['nlcd5']
 nh3perkm2           = nh3 / totlanduse 
 nh3perkm2.to_csv("./outputs/NH3_emis.csv")
 # 1.075 Tg/year
 # For comparison: 0.93 Tg-NH3/yr from NEI 2017.
 
+# 1b. NH3 from pasture
+pasturen            = (pixels['nlcd2'] * pixels['pastureemis'])
+#print("Total NH3 emissions from pasture:", pasturen.sum() /1000000000, "Tg/yr")
+#nh3perkm2           = nh3 / totlanduse 
+
 # 2. PM2.5
 pm25                = (pixels['nlcd1'] * pixels['dust-emis'])
-print("Total PM2.5 emissions:", pm25.sum() /1000000000, "Tg/yr")
+#print("Total PM2.5 emissions:", pm25.sum() /1000000000, "Tg/yr")
 pm25perkm2          = pm25 / totlanduse
 pm25perkm2.to_csv("./outputs/PM25_emis.csv")
 # 0.17 Tg/yr
@@ -239,7 +283,7 @@ pm25perkm2.to_csv("./outputs/PM25_emis.csv")
 
 # 3. NOx
 nox                 = (pixels['nlcd1'] * cropnox) + ((pixels['nlcd2'] + pixels['nlcd5']) * grassnox) + (pixels['nlcd3'] * forestnox)
-print("Total NOx emissions", nox.sum() /1000000000, "Tg/yr")
+#print("Total NOx emissions", nox.sum() /1000000000, "Tg/yr")
 noxperkm2           = nox / totlanduse
 noxperkm2.to_csv("./outputs/NOx_emis.csv")
 # 1.23 Tg/yr
@@ -252,13 +296,13 @@ noxperkm2.to_csv("./outputs/NOx_emis.csv")
 voct                = pd.merge(pixels, bvoc, on='FIPS', how='left')
 vocemis             = (voct['nlcd1'] * voct['Ag']) + ((voct['nlcd2'] + voct['nlcd5']) * voct['Grass']) + (voct['nlcd3'] * voct['Forest'])
 vocemis             = (voct['nlcd3'] * voct['Forest'])
-print("VOC from forest:", vocemis.sum() /1000000000, "Tg/yr")
+#print("VOC from forest:", vocemis.sum() /1000000000, "Tg/yr")
 vocemis             = (voct['nlcd1'] * voct['Ag'])
-print("VOC from agriculture:", vocemis.sum() /1000000000, "Tg/yr")
+#print("VOC from agriculture:", vocemis.sum() /1000000000, "Tg/yr")
 vocemis             = (voct['nlcd2'] + voct['nlcd5']) * voct['Grass']
-print("VOC from grasslands:", vocemis.sum() /1000000000, "Tg/yr")
+#print("VOC from grasslands:", vocemis.sum() /1000000000, "Tg/yr")
 vocemis             = (voct['nlcd1'] * voct['Ag']) + ((voct['nlcd2'] + voct['nlcd5']) * voct['Grass']) + (voct['nlcd3'] * voct['Forest'])
-print("Total VOC emissions:", vocemis.sum() /1000000000, "Tg/yr")
+#print("Total VOC emissions:", vocemis.sum() /1000000000, "Tg/yr")
 vocemisperkm2       = vocemis / totlanduse
 vocemisperkm2.to_csv("./outputs/VOC_emis.csv")
 pixels['FIPS'].to_csv("./outputs/FIPS_emis.csv")
@@ -266,6 +310,35 @@ pixels['FIPS'].to_csv("./outputs/FIPS_emis.csv")
 # 22.8 Tg/yr
 # For comparison: 24.8 Tg/yr from MEGAN2.1 as processed in
 # Thakrar et al. (2022).
+
+#########################################################################
+######################### UNCERTAINTY PARAMETERS ########################
+#########################################################################
+
+# We can consider uncertainties from many sources:
+# 1. Model:             here, we use results for 2 RCMs (InMAP or AP2)
+# 2. C-R function:      here, we use GEMM, ACS and H6S C-R functions
+# 3. Deposition:        here, we use avg, max and min values for each county
+# 5. VSL:               for mortality risk, we use a range of VSL estimates
+# 6. SCC:               for carbon sequestration, we use a range of estimates
+
+# 1. Model (choose between 'InMAP' or 'AP2')
+aqm                 = 'InMAP'
+
+# 2. C-R function (choose between 'gemm', 'acs', or 'h6s')
+cr                  = 'gemm'
+
+# 3. Deposition (choose between 'mean', 'min', or 'max')
+dep_param           = 'mean'
+
+# 4. VSL (choose between vsl_central, vsl_central - vsl_stdev, and vsl_central + vsl_stdev)
+# https://www.epa.gov/sites/default/files/2017-09/documents/ee-0568-22.pdf
+vsl_central         = 7.4
+vsl_stdev           = 4.7
+epa_vsl             = vsl_central
+
+# 5. SCC (choose between '5avg', '3avg', '2.5avg', '3high)
+scc_param = '3avg'
 
 #########################################################################
 ######################### MORTALITY  ESTIMATION #########################
@@ -310,6 +383,10 @@ def agdeaths(scenario, model, crf):
     pmd                 = isrm[(isrm.pollutant == 'pm25') & (isrm.model == model) & (isrm.crf == crf)]
     pmd                 = pd.merge(pixels, pmd, on='FIPS',how='left')
     resultpm            = pmd[scenario+'1'] * pmd['dust-emis'] * pmd['mortality']
+    # From Windblown dust
+    wbd                 = isrm[(isrm.pollutant == 'pm25') & (isrm.model == model) & (isrm.crf == crf)]
+    wbd                 = pd.merge(pixels, wbd, on='FIPS',how='left')
+    resultwb            = wbd[scenario+'1'] * wbdust['Agricultural'] * wbd['mortality']
     # From NOx
     noxd                = isrm[(isrm.pollutant == 'nox') & (isrm.model == model) & (isrm.crf == crf)]
     noxd                = pd.merge(pixels, noxd, on='FIPS',how='left')
@@ -321,10 +398,10 @@ def agdeaths(scenario, model, crf):
     # From VOC
     vocd                = isrm[(isrm.pollutant == 'voc') & (isrm.model == model) & (isrm.crf == crf)]
     vocd                = pd.merge(pixels, vocd, on='FIPS', how='left')
-    vocd                = pd.merge(vocd, bvoc, on='FIPS', how='left')
     bvoc['Ag']          = bvoc['Ag'].replace(np.nan, bvoc['Ag'].mean())
-    resultvoc           =  vocd['Forest'] * vocd[scenario+'1'] * vocd['mortality']
-    return resultpm.sum() + resultnox.sum() + resultnh3.sum() + resultvoc.sum()
+    vocd                = pd.merge(vocd, bvoc, on='FIPS', how='left')
+    resultvoc           =  vocd['Ag'] * vocd[scenario+'1'] * vocd['mortality']
+    return resultpm.sum() + resultnox.sum() + resultnh3.sum() + resultvoc.sum() + resultwb.sum()
 
 def pasturedeaths(scenario, model, crf):
     # From NOx
@@ -334,17 +411,25 @@ def pasturedeaths(scenario, model, crf):
     # From VOC
     vocd                = isrm[(isrm.pollutant == 'voc') & (isrm.model == model) & (isrm.crf == crf)]
     vocd                = pd.merge(pixels, vocd, on='FIPS')
-    vocd                = pd.merge(vocd, bvoc, on='FIPS', how='left')
     bvoc['Grass']       = bvoc['Grass'].replace(np.nan, bvoc['Grass'].mean())
-    resultvoc           =  vocd['Grass'] * (vocd[scenario+'5'] + vocd[scenario+'2']) * vocd['mortality']
-    return resultnox.sum() + resultvoc.sum()
+    vocd                = pd.merge(vocd, bvoc, on='FIPS', how='left')
+    resultvoc           = vocd['Grass'] * (vocd[scenario+'5'] + vocd[scenario+'2']) * vocd['mortality']
+    # From NH3
+    nh3d                = isrm[(isrm.pollutant == 'nh3') & (isrm.model == model) & (isrm.crf == crf)]
+    nh3d                = pd.merge(pixels, nh3d, on='FIPS',how='left')
+    resultnh3           = (nh3d[scenario+'2'] * nh3d['pastureemis']) * nh3d['mortality']
+    # From Windblown dust
+    wbd                 = isrm[(isrm.pollutant == 'pm25') & (isrm.model == model) & (isrm.crf == crf)]
+    wbd                 = pd.merge(pixels, wbd, on='FIPS',how='left')
+    resultwb            = (wbd[scenario+'5'] + wbd[scenario+'2']) * wbdust['Grasslands'] * wbd['mortality']
+    return resultnox.sum() + resultvoc.sum() + resultnh3.sum() + resultwb.sum()
 
 def forestdeaths(scenario, model, crf):
    # From VOC
     vocd                = isrm[(isrm.pollutant == 'voc') & (isrm.model == model) & (isrm.crf == crf)]
     vocd                = pd.merge(pixels, vocd, on='FIPS', how='left')
-    vocd                 = pd.merge(vocd, bvoc, on='FIPS',how='left')
     bvoc['Forest']      = bvoc['Forest'].replace(np.nan, bvoc['Forest'].mean())
+    vocd                 = pd.merge(vocd, bvoc, on='FIPS',how='left')
     resultvoc           =  vocd['Forest'] * vocd[scenario+'3'] * vocd['mortality']
     return resultvoc.sum()
 
@@ -355,7 +440,7 @@ def deaths(lu, scenario):
             'ag':       agdeaths
     }
     func = switch.get(lu, lambda: "")
-    return func(scenario, 'InMAP', 'gemm')
+    return func(scenario, aqm, cr)
 
 ag_base                 = deaths('ag','nlcd')
 forest_base             = deaths('forest','nlcd')
@@ -364,77 +449,129 @@ tot_base                = ag_base + forest_base + pasture_base
 
 # Change in deaths relative to 2001
 scenarios               = ["forest", "native", "proag", "ref", "urban"]
-#for x in scenarios:
-#    change              = deaths('ag', x) + deaths('forest', x) + deaths('pasture', x) - tot_base
-#    print(x, change)
-
-# Change in deaths per year for each scenario:
-# forest -549.4801387047701
-# native -1500.1547492714672
-# proag 4260.98909183668
-# ref -707.7106439542549
-# urban 360.58434478419076
-
+'''
+for x in scenarios:
+    change              = deaths('ag', x) + deaths('forest', x) + deaths('pasture', x) - tot_base
+    print(x, change)
+'''
 # change in deaths from each land use type:
-# for x in scenarios:
-#        change              = deaths('ag', x) - ag_base
-#        print("deaths from ag land for scenario:", x, change)
-# for x in scenarios:
-#        change              = deaths('forest', x) - forest_base
-#        print("deaths from forest land for scenario:", x, change)
-#for x in scenarios:
-#        change              = deaths('pasture', x) - pasture_base
-#        print("deaths from pasture land for scenario:", x, change)
-#
-#   Table A: Change in deaths per year from land use derived emissions
-#   relative to 2001, broken down by the land use type causing the
-#   emissions, for different land use change scenarios. This does not
-#   consider deposition.
-#   Scenario                        Land use type
-#               Agricultural land    Forest land     Pasture land   Total
-#   Forest          -3304               3730            - 976       - 549
-#   Native          -2516               1602            - 586       -1500
-#   Proag            4559                751            -1050        4261
-#   Ref             -1490               1498            - 715       - 708
-#   Urban           - 900               1926            - 664         360
-
+'''
+for x in scenarios:
+    change              = deaths('ag', x) - ag_base
+    print("deaths from ag land for scenario:", x, change)
+for x in scenarios:
+    change              = deaths('forest', x) - forest_base
+    print("deaths from forest land for scenario:", x, change)
+for x in scenarios:
+    change              = deaths('pasture', x) - pasture_base
+    print("deaths from pasture land for scenario:", x, change)
+'''
 
 #########################################################################
 ############################## DEPOSITION ###############################
 #########################################################################
 
-# We consider land-use related pollutant removal from forests only.
+# We consider land-use related pollutant removal from forests, grasslands,
+# and agricultural land.
 # We consider removal of ambient PM2.5, NO2, and SO2.
 # The pollutant removal per tree area for each county in g/m2 is given by
 # the i-Tree Landscape Pollutant Ranges, available from:
 # https://www.itreetools.org/support/resources-overview/i-tree-methods-and-files
 dep                     = pd.read_csv("./inputs/dep/Landscape_air_pollutant_removal_ranges.csv")
+gdep                    = pd.read_csv("./inputs/dep/Shrubland_Landscape_air_pollutant_removal_ranges.csv")
+pdep                    = pd.read_csv("./inputs/dep/Grassland_Landscape_air_pollutant_removal_ranges.csv")
 # For each scenario, we derive the change in pollutant removal (kg) and
 # the associated health impacts if that pollution was emitted at ground level
 # in the county where it was deposited.
 def getpmdep(scenario, model, crf):
-    depp                = dep[['FIPS','PM2.5mean']]
+    depp                = dep[['FIPS','PM2.5'+dep_param]]
     pmd                 = isrm[(isrm.pollutant == 'pm25') & (isrm.model == model) & (isrm.crf == crf)]
     depp                = pd.merge(depp, pmd, on='FIPS',how='left')
+    depp['PM2.5mean'].fillna(value=depp['PM2.5'+dep_param].mean(), inplace=True)
     df                  = pixels[['FIPS',scenario+'3','nlcd3']]
     df                  = pd.merge(df, depp, on='FIPS',how='left')
-    return (df[scenario+'3'] - df['nlcd3']) * df['PM2.5mean'] * 1000 * df['mortality']
+    df['PM2.5mean'].fillna(value=df['PM2.5'+dep_param].mean(), inplace=True)
+    result1             =  (df[scenario+'3'] - df['nlcd3']) * df['PM2.5'+dep_param] * 1000 * df['mortality']
+    result1.fillna(value=0.0, inplace=True)
+    gdepp               = gdep[['FIPS','PM2.5'+dep_param]]
+    pmd                 = isrm[(isrm.pollutant == 'pm25') & (isrm.model == model) & (isrm.crf == crf)]
+    gdepp               = pd.merge(gdepp, pmd, on='FIPS',how='left')
+    gdepp['PM2.5'+dep_param].fillna(value=gdepp['PM2.5'+dep_param].mean(), inplace=True)
+    gdf                 = pixels[['FIPS',scenario+'1','nlcd1',scenario+'2','nlcd2',scenario+'5','nlcd5']]
+    gdf                  = pd.merge(gdf, gdepp, on='FIPS',how='left')
+    gdf['PM2.5'+dep_param].fillna(value=gdf['PM2.5'+dep_param].mean(), inplace=True)
+    result2             =  (gdf[scenario+'5'] - gdf['nlcd5']) * gdf['PM2.5'+dep_param] * 1000 * gdf['mortality']
+    result2.fillna(value=0.0, inplace=True)
+    pdepp               = pdep[['FIPS','PM2.5'+dep_param]]
+    pmd                 = isrm[(isrm.pollutant == 'pm25') & (isrm.model == model) & (isrm.crf == crf)]
+    pdepp               = pd.merge(pdepp, pmd, on='FIPS',how='left')
+    pdepp['PM2.5'+dep_param].fillna(value=pdepp['PM2.5'+dep_param].mean(), inplace=True)
+    pdf                 = pixels[['FIPS',scenario+'1','nlcd1',scenario+'2','nlcd2',scenario+'5','nlcd5']]
+    pdf                 = pd.merge(pdf, pdepp, on='FIPS',how='left')
+    pdf['PM2.5'+dep_param].fillna(value=pdf['PM2.5'+dep_param].mean(), inplace=True)
+    result3             =  (pdf[scenario+'2'] - pdf['nlcd2']) * pdf['PM2.5'+dep_param] * 1000 * pdf['mortality']
+    result3.fillna(value=0.0, inplace=True)
+    return (result1 + result2 + result3)
 
 def getnoxdep(scenario, model, crf):
-    depp                = dep[['FIPS','NO2mean']]
+    depp                = dep[['FIPS','NO2'+dep_param]]
     pmd                 = isrm[(isrm.pollutant == 'nox') & (isrm.model == model) & (isrm.crf == crf)]
     depp                = pd.merge(depp, pmd, on='FIPS',how='left')
+    depp['NO2'+dep_param].fillna(value=depp['NO2'+dep_param].mean(), inplace=True)
     df                  = pixels[['FIPS',scenario+'3','nlcd3']]
     df                  = pd.merge(df, depp, on='FIPS',how='left')
-    return (df[scenario+'3'] - df['nlcd3']) * df['NO2mean'] * 1000 * df['mortality']
+    df['NO2'+dep_param].fillna(value=df['NO2'+dep_param].mean(), inplace=True)
+    result1             = (df[scenario+'3'] - df['nlcd3']) * df['NO2'+dep_param] * 1000 * df['mortality']
+    result1.fillna(value=0.0, inplace=True)
+    gdepp               = gdep[['FIPS','NO2'+dep_param]]
+    pmd                 = isrm[(isrm.pollutant == 'nox') & (isrm.model == model) & (isrm.crf == crf)]
+    gdepp               = pd.merge(gdepp, pmd, on='FIPS',how='left')
+    gdepp['NO2'+dep_param].fillna(value=gdepp['NO2'+dep_param].mean(), inplace=True)
+    gdf                 = pixels[['FIPS',scenario+'1','nlcd1',scenario+'2','nlcd2',scenario+'5','nlcd5']]
+    gdf                 = pd.merge(gdf, gdepp, on='FIPS',how='left')
+    gdf['NO2'+dep_param].fillna(value=gdf['NO2'+dep_param].mean(), inplace=True)
+    result2             =  (gdf[scenario+'5'] - gdf['nlcd5']) * gdf['NO2'+dep_param] * 1000 * gdf['mortality']
+    result2.fillna(value=0.0, inplace=True)
+    pdepp               = pdep[['FIPS','NO2'+dep_param]]
+    pmd                 = isrm[(isrm.pollutant == 'nox') & (isrm.model == model) & (isrm.crf == crf)]
+    pdepp               = pd.merge(pdepp, pmd, on='FIPS',how='left')
+    pdepp['NO2'+dep_param].fillna(value=pdepp['NO2'+dep_param].mean(), inplace=True)
+    pdf                 = pixels[['FIPS',scenario+'1','nlcd1',scenario+'2','nlcd2',scenario+'5','nlcd5']]
+    pdf                 = pd.merge(pdf, pdepp, on='FIPS',how='left')
+    pdf['NO2'+dep_param].fillna(value=pdf['NO2'+dep_param].mean(), inplace=True)
+    result3             =  (pdf[scenario+'2'] - pdf['nlcd2']) * pdf['NO2'+dep_param] * 1000 * pdf['mortality']
+    result3.fillna(value=0.0, inplace=True)
+    return (result1 + result2 + result3)
 
 def getsoxdep(scenario, model, crf):
-    depp                = dep[['FIPS','SO2mean']]
+    depp                = dep[['FIPS','SO2'+dep_param]]
     pmd                 = isrm[(isrm.pollutant == 'so2') & (isrm.model == model) & (isrm.crf == crf)]
     depp                = pd.merge(depp, pmd, on='FIPS',how='left')
+    depp['SO2'+dep_param].fillna(value=depp['SO2'+dep_param].mean(), inplace=True)
     df                  = pixels[['FIPS',scenario+'3','nlcd3']]
     df                  = pd.merge(df, depp, on='FIPS',how='left')
-    return (df[scenario+'3'] - df['nlcd3']) * df['SO2mean'] * 1000 * df['mortality']
+    df['SO2'+dep_param].fillna(value=df['SO2'+dep_param].mean(), inplace=True)
+    result1             = (df[scenario+'3'] - df['nlcd3']) * df['SO2'+dep_param] * 1000 * df['mortality']
+    result1.fillna(value=0.0, inplace=True)
+    gdepp               = gdep[['FIPS','SO2'+dep_param]]
+    pmd                 = isrm[(isrm.pollutant == 'so2') & (isrm.model == model) & (isrm.crf == crf)]
+    gdepp               = pd.merge(gdepp, pmd, on='FIPS',how='left')
+    gdepp['SO2'+dep_param].fillna(value=gdepp['SO2'+dep_param].mean(), inplace=True)
+    gdf                 = pixels[['FIPS',scenario+'1','nlcd1',scenario+'2','nlcd2',scenario+'5','nlcd5']]
+    gdf                 = pd.merge(gdf, gdepp, on='FIPS',how='left')
+    gdf['SO2'+dep_param].fillna(value=gdf['SO2'+dep_param].mean(), inplace=True)
+    result2             = (gdf[scenario+'5'] - gdf['nlcd5']) * gdf['SO2'+dep_param] * 1000 * gdf['mortality']
+    result2.fillna(value=0.0, inplace=True)
+    pdepp               = pdep[['FIPS','SO2'+dep_param]]
+    pmd                 = isrm[(isrm.pollutant == 'so2') & (isrm.model == model) & (isrm.crf == crf)]
+    pdepp               = pd.merge(pdepp, pmd, on='FIPS',how='left')
+    pdepp['SO2'+dep_param].fillna(value=pdepp['SO2'+dep_param].mean(), inplace=True)
+    pdf                 = pixels[['FIPS',scenario+'1','nlcd1',scenario+'2','nlcd2',scenario+'5','nlcd5']]
+    pdf                 = pd.merge(pdf, pdepp, on='FIPS',how='left')
+    pdf['SO2'+dep_param].fillna(value=pdf['SO2'+dep_param].mean(), inplace=True)
+    result3             =  (pdf[scenario+'2'] - pdf['nlcd2']) * pdf['SO2'+dep_param] * 1000 * pdf['mortality']
+    result3.fillna(value=0.0, inplace=True)
+    return (result1 + result2 + result3)
 
 def deposition(pol, scenario):
     switch = {
@@ -443,43 +580,26 @@ def deposition(pol, scenario):
             'sox':      getsoxdep
     }
     func = switch.get(pol, lambda: "")
-    return func(scenario, 'InMAP', 'gemm')
+    return func(scenario, aqm, cr)
 
 #print((pixels['proag3'] - pixels['nlcd3']).sum())
-
+'''
+print("change in deaths from deposition (+ is fewer deaths, - is more deaths)")
 for x in scenarios:
     change               = (deposition('pm25', x)).sum() + (deposition('nox', x)).sum() + (deposition('sox', x)).sum()
     print(x, change)
+'''
 
-# forest 478.3984070196831
-# native 136.9907773351829
-# proag -21.417154623721643
-# ref 150.33651094355906
-# urban 301.32150487688506
-
-
-#   Table B: Change in deaths per year from land use derived emissions
-#   relative to 2001, broken down by the land use type causing the
-#   emissions, or deposition from forests, for different land use change
-#   scenarios.
-#   Scenario                        Land use type       
-#               Agricultural land       Forest land         Pasture land            Total           Total
-#                                   Emissions   Deposition                  (without deposition)
-#   Forest          -3304               3730        -478        - 976               - 549           -1028
-#   Native          -2516               1602        -136        - 586               -1500           -1636
-#   Proag            4559                751          21        -1050                4261            4281
-#   Ref             -1490               1498        -150        - 715               - 708           - 857
-#   Urban           - 900               1926        -301        - 664                 360              61
-#   [N.B. The policy scenarios should be made with reference to the 'Ref' scenario.]
 #########################################################################
 ############################### VALUATION ###############################
 #########################################################################
 
 # 1. Valuation of change in mortality risk attributable to PM2.5 exposure
-# We use the EPA central estimate of $7.4 million ($2006)
+# We use the EPA central estimate of $7.4 million ($2006) +/- one standard
+# deviation.
 # We use the BLS inflation calculator https://data.bls.gov/cgi-bin/cpicalc.pl
 # to convert $2006 to $2021
-vsl                     = 7.4 * 1.40 * 1000000
+vsl                     = epa_vsl * 1.40 * 1000000
 
 # 2. Valuation of economic returns to land
 # We use the following data from http://quickstats.nass.usda.gov/
@@ -487,6 +607,9 @@ vsl                     = 7.4 * 1.40 * 1000000
 # AG LAND, CROPLAND - ASSET VALUE, MEASURED IN $ / ACRE > TOTAL > STATE >
 # 2001 > ANNUAL > YEAR
 cropval                 = pd.read_csv("./inputs/val/croplandassetvalue.csv")
+# NOTE: For the high crop demand scenario (proag), we want to use the following values instead:
+#cropval                 = pd.read_csv("./inputs/val/croplandassetvalue_highcropdemand.csv")
+
 # For several states, the value is "(D)" because there isn't enough data to
 # anonymously report statistics. We replace these with the average.
 cropval.replace(to_replace =" (D)", value =np.nan, inplace=True)
@@ -506,6 +629,33 @@ def getcropvals(scen):
     df['cropchange']    = df[scen+'1'] - df['nlcd1']
 #    df['Value'].replace({0: othercropstates}, inplace=True)
     return (df['cropchange'] * df['Value']).sum()
+
+# Pasture
+# SURVEY > ECONOMICS > FARMS & LAND & ASSETS > AG LAND > ASSET VALUE >
+# AG LAND, PASTURELAND - ASSET VALUE, MEASURED IN $ / ACRE > TOTAL > STATE >
+# 2021 > ANNUAL > YEAR
+pastureval              = pd.read_csv("./inputs/val/pasturelandassetvalue.csv")
+# For several states, the value is "(D)" because there isn't enough data to
+# anonymously report statistics. We replace these with the average.
+pastureval.replace(to_replace =" (D)", value =np.nan, inplace=True)
+pastureval.replace(to_replace =",", value ="", regex=True, inplace=True)
+pastureval.Value = pastureval.Value.astype(float)
+pastureval['Value'].fillna(value=pastureval['Value'].mean(), inplace=True)
+
+# Get states (NaN is other states)
+pastureval['State ANSI'].replace(to_replace =np.nan, value ="0", inplace=True)
+pastureval['State ANSI'] = pastureval['State ANSI'].astype(int) * 1000
+otherpasturestates      = pastureval[pastureval['State ANSI'] == 0].Value
+# The values are in $ / acre, rather than $ / km2.
+# Also, convert from $2001 to $2021 Using BLS inflation calculator:
+# $1 (2001) = $1.49 (2021) 
+pastureval['Value']     = pastureval['Value'] / 0.00404686
+def getpasturevals(scen):
+    pixels['State ANSI']= (np.floor(pixels['FIPS']/1000)*1000).astype(int)
+    df                  = pd.merge(pastureval,pixels,on='State ANSI', how='left')
+    df['pasturechange']    = (df[scen+'2'] - df['nlcd2'])
+    return (df['pasturechange'] * df['Value']).sum()
+
 
 # 3. For other ecosystem services, read the data underlying Lawler et al. (2014)
 # figures 2 and 4. This data was recorded using Web Plot Digitizer:
@@ -613,14 +763,48 @@ horizon                 = 50
 onebillion              = 1000000000.0
 # our discount rate is 3%:
 discountf               = 0.97
-# so, totfactor gives the multiplier based on the horizon and discount rate
+
+# This incorporates the 20-year cessation lag in deaths
+cessation = [0.3, 0.425 ,0.55, 0.675, 0.8, 0.813333333, 0.826666667, 0.84, 0.853333333,
+        0.866666667, 0.88, 0.893333333, 0.906666667, 0.92, 0.933333333,
+        0.946666667, 0.96, 0.973333333, 0.986666667, 0.999999997, 0.999999993,
+        0.99999999, 0.999999987, 0.999999983, 0.99999998, 0.999999977,
+        0.999999973, 0.99999997, 0.999999967,0.999999963,0.99999996,
+        0.999999957,0.999999953,0.99999995,0.99999995, 0.99999995, 0.99999995,
+        0.99999995, 0.99999995, 0.99999995, 0.99999995, 0.99999995, 0.99999995,
+        0.99999995, 0.99999995, 0.99999995,0.99999995,0.99999995,0.99999995,0.99999995]
+
+import math
+def get_sensitivity(perc):
+    # The 7 refers to the number of years between 2005 and 2012 (Holt et al., 2015)
+    ff = math.exp((math.log(1-perc))/7)
+    i = [1.0]
+    for j in range(0,50):
+        i.append(i[-1]*ff)
+    return i
+
+nh3_sensitivity = get_sensitivity(0.38)
+nox_sensitivity = get_sensitivity(0.29)
+sox_sensitivity = get_sensitivity(-0.23)
+
+#nh3_sensitivity = [1.0, 0.933988803, 0.872335085, 0.814751202, 0.7609685, 0.710736059,
+#                   0.663819521, 0.62, 0.579073058, 0.540847753, 0.505145745, 0.47180047,
+#                   0.440656356, 0.411568103, 0.3844, 0.359025296, 0.335325607, 0.313190362,
+#                   0.292516291, 0.273206941, 0.255172224, 0.238328, 0.222595684, 0.207901876,
+#                   0.194178024, 0.181360101, 0.169388303, 0.158206779, 0.14776336, 0.138009324,
+#                   0.128899163, 0.120390375, 0.112443262, 0.105020748, 0.098088203, 0.091613283,
+#                   0.085565781, 0.079917481, 0.074642033, 0.069714823, 0.065112864, 0.060814686,
+#                   0.056800236, 0.053050784, 0.049548838, 0.04627806, 0.04322319, 0.040369976,
+#                   0.037705105, 0.035216146, 0.032891486]
+
+
+# so, totfactor gives the multiplier based on the horizon, discount rate, and cessation lag.
 totfactor = 0.0
-count = 1
-while (count <= horizon):
-    totfactor = totfactor + pow(discountf,count)
+count = 0
+while (count < horizon):
+    totfactor = totfactor + pow(discountf,count) * cessation[count]
     count = count + 1
-# print(totfactor)
-# totfactor = 25.282552863767144
+#print(totfactor)
 
 rows                    = []
 for x in scenarios:
@@ -629,53 +813,310 @@ for x in scenarios:
     # climate cost
     # We want the model average using the 3% discount rate
     # Convert 10^8 MgC to kgC
-    carboncost          = lawler(x)['carbon'] * getscc('3avg') * 100000000000
+    carboncost          = lawler(x)['carbon'] * getscc(scc_param) * 100000000000
     # economic returns to land
     forestv             = forestval(x)
     cropv               = getcropvals(x)
+    pasturev            = getpasturevals(x)
     # append data
-    rows.append([x, change * -1.0 * vsl * totfactor / onebillion, carboncost / onebillion, forestv / onebillion, cropv / onebillion])
+    rows.append([x, change * -1.0 * vsl * totfactor / onebillion, carboncost / onebillion, forestv / onebillion, cropv / onebillion, pasturev/onebillion])
 
-results                 = pd.DataFrame(rows, columns=["scenario", "aq $", "carbon $", "forest $", "crop $"])
+results                 = pd.DataFrame(rows, columns=["scenario", "aq $", "carbon $", "forest $", "crop $", "pasture $"])
 print(results)
 #results.to_csv("./outputs/fig1.csv")
 
-#########################################################################
-############################## UNCERTAINTY ##############################
-#########################################################################
-
-# We can consider uncertainties from many sources:
-# 1. Emissions:         here, we scale total emissions by the % difference
-#                       against published emission inventories
-# 2. Model:             here, we use results for 3 RCMs (InMAP, EASIUR, AP2)
-# 3. C-R function:      here, we use both ACS and H6S C-R functions
-# 4. Deposition:        here, we use the max and min values for each county
-# 5. Valuation:         for mortality risk, we use a range of VSL estimates
-#                       for carbon sequestration, we use a range of estimates
-#                       we also consider alternative discount rates
-
-# Emissions: low, high
-
-# 2. Model
-# For calculating both deposition and deaths, change the model from 'InMAP'
-# to 'AP2' or 'EASIUR'.
-
-# 3. C-R function
-# For calculating both deposition and deaths, change the C-R function from
-# 'acs' to 'h6s'.
-
-# 4. Deposition
-# Change 'PM2.5mean' to 'PM2.5min' and 'PM2.5max', and do the same for SO2
-# and NO2
-
-# Valuation
-# Change the VSL from the EPA mean to the lowest and highest values from
-# Table B1:
-# https://www.epa.gov/sites/default/files/2017-09/documents/ee-0568-22.pdf
-# i.e., 0.85-19.80 2006US$.
 
 #########################################################################
-################################ FIGURES ################################
+############################## SENSITIVITY ##############################
+#########################################################################
+# Because of changes in background pollutant concentrations over time, the sensitivity
+# of secondary PM2.5 formation to NH3 or NOx emissions changes over time.
+# We estimate the effects of this on a very conservative scenario, where:
+# Deposition goes to zero
+# NH3 gets 38% smaller every 7 years
+# NOx gets 29% smaller every 7 years
+
+def get_tot_factor_sens(sens):
+    totfactor = 0.0
+    count = 0
+    while (count < horizon):
+        totfactor = totfactor + pow(discountf,count) * cessation[count] * sens[count]
+        count = count + 1
+    return totfactor
+
+totfactor_nh3 = get_tot_factor_sens(nh3_sensitivity)
+totfactor_nox = get_tot_factor_sens(nox_sensitivity)
+totfactor_sox = get_tot_factor_sens(sox_sensitivity)
+
+def agotherdeaths(scenario, model, crf):
+    # From PM2.5
+    pmd                 = isrm[(isrm.pollutant == 'pm25') & (isrm.model == model) & (isrm.crf == crf)]
+    pmd                 = pd.merge(pixels, pmd, on='FIPS',how='left')
+    resultpm            = pmd[scenario+'1'] * pmd['dust-emis'] * pmd['mortality']
+    # From windblown dust
+    wbd                 = isrm[(isrm.pollutant == 'pm25') & (isrm.model == model) & (isrm.crf == crf)]
+    wbd                 = pd.merge(pixels, wbd, on='FIPS',how='left')
+    resultwb            = wbd[scenario+'1'] * wbdust['Agricultural'] * wbd['mortality']
+    # From VOC
+    vocd                = isrm[(isrm.pollutant == 'voc') & (isrm.model == model) & (isrm.crf == crf)]
+    vocd                = pd.merge(pixels, vocd, on='FIPS', how='left')
+    vocd                = pd.merge(vocd, bvoc, on='FIPS', how='left')
+    bvoc['Ag']          = bvoc['Ag'].replace(np.nan, bvoc['Ag'].mean())
+    resultvoc           =  vocd['Ag'] * vocd[scenario+'1'] * vocd['mortality']
+    return resultpm.sum() + resultvoc.sum() + resultwb.sum()
+
+def agpmdeaths(scenario, model, crf):
+    # From PM2.5
+    pmd                 = isrm[(isrm.pollutant == 'pm25') & (isrm.model == model) & (isrm.crf == crf)]
+    pmd                 = pd.merge(pixels, pmd, on='FIPS',how='left')
+    resultpm            = pmd[scenario+'1'] * pmd['dust-emis'] * pmd['mortality']
+    # From windblown dust
+    wbd                 = isrm[(isrm.pollutant == 'pm25') & (isrm.model == model) & (isrm.crf == crf)]
+    wbd                 = pd.merge(pixels, wbd, on='FIPS',how='left')
+    resultwb            = wbd[scenario+'1'] * wbdust['Agricultural'] * wbd['mortality']
+    return resultpm.sum() + resultwb.sum()
+
+def agvocdeaths(scenario, model, crf):
+    # From VOC
+    vocd                = isrm[(isrm.pollutant == 'voc') & (isrm.model == model) & (isrm.crf == crf)]
+    vocd                = pd.merge(pixels, vocd, on='FIPS', how='left')
+    vocd                = pd.merge(vocd, bvoc, on='FIPS', how='left')
+    bvoc['Ag']          = bvoc['Ag'].replace(np.nan, bvoc['Ag'].mean())
+    resultvoc           =  vocd['Ag'] * vocd[scenario+'1'] * vocd['mortality']
+    return resultvoc.sum()
+
+def agnoxdeaths(scenario, model, crf):
+    # From NOx
+    noxd                = isrm[(isrm.pollutant == 'nox') & (isrm.model == model) & (isrm.crf == crf)]
+    noxd                = pd.merge(pixels, noxd, on='FIPS',how='left')
+    resultnox           = (noxd[scenario+'1'] * cropnox) * noxd['mortality']
+    return resultnox.sum()
+
+def agnh3deaths(scenario, model, crf):
+    # From NH3
+    nh3d                = isrm[(isrm.pollutant == 'nh3') & (isrm.model == model) & (isrm.crf == crf)]
+    nh3d                = pd.merge(pixels, nh3d, on='FIPS',how='left')
+    resultnh3           = (nh3d[scenario+'1'] * nh3d['nh3-emis']) * nh3d['mortality']
+    return resultnh3.sum()
+
+def pasturenoxdeaths(scenario, model, crf):
+    # From NOx
+    noxd                = isrm[(isrm.pollutant == 'nox') & (isrm.model == model) & (isrm.crf == crf)]
+    noxd                = pd.merge(pixels, noxd, on='FIPS',how='left')
+    resultnox          = ((noxd[scenario+'2'] + noxd[scenario+'5']) * grassnox) * noxd['mortality']
+    return resultnox.sum()
+
+def pasturenh3deaths(scenario, model, crf):
+    # From NH3
+    nh3d                = isrm[(isrm.pollutant == 'nh3') & (isrm.model == model) & (isrm.crf == crf)]
+    nh3d                = pd.merge(pixels, nh3d, on='FIPS',how='left')
+    resultnh3           = (nh3d[scenario+'2'] * nh3d['pastureemis']) * nh3d['mortality']
+    return resultnh3.sum()
+
+def pasturepmdeaths(scenario, model, crf):
+    # From Windblown dust
+    wbd                 = isrm[(isrm.pollutant == 'pm25') & (isrm.model == model) & (isrm.crf == crf)]
+    wbd                 = pd.merge(pixels, wbd, on='FIPS',how='left')
+    resultwb            = (wbd[scenario+'5'] + wbd[scenario+'2']) * wbdust['Grasslands'] * wbd['mortality']
+    return resultwb.sum()
+
+def pastureotherdeaths(scenario, model, crf):
+    # From VOC
+    vocd                = isrm[(isrm.pollutant == 'voc') & (isrm.model == model) & (isrm.crf == crf)]
+    vocd                = pd.merge(pixels, vocd, on='FIPS')
+    vocd                = pd.merge(vocd, bvoc, on='FIPS', how='left')
+    bvoc['Grass']       = bvoc['Grass'].replace(np.nan, bvoc['Grass'].mean())
+    resultvoc           =  vocd['Grass'] * (vocd[scenario+'5'] + vocd[scenario+'2']) * vocd['mortality']
+    return resultvoc.sum()
+
+def forestdeaths(scenario, model, crf):
+   # From VOC
+    vocd                = isrm[(isrm.pollutant == 'voc') & (isrm.model == model) & (isrm.crf == crf)]
+    vocd                = pd.merge(pixels, vocd, on='FIPS', how='left')
+    vocd                 = pd.merge(vocd, bvoc, on='FIPS',how='left')
+    bvoc['Forest']      = bvoc['Forest'].replace(np.nan, bvoc['Forest'].mean())
+    resultvoc           =  vocd['Forest'] * vocd[scenario+'3'] * vocd['mortality']
+    return resultvoc.sum()
+
+def deaths_sens(lu, scenario):
+    switch = {
+            'forest':           forestdeaths,
+            'ag_nox':           agnoxdeaths,
+            'ag_nh3':           agnh3deaths,
+            'ag_other':         agotherdeaths,
+            'ag_pm':            agpmdeaths,
+            'ag_voc':           agvocdeaths,
+            'pasture_nox':      pasturenoxdeaths,
+            'pasture_nh3':      pasturenh3deaths,
+            'pasture_other':    pastureotherdeaths,
+            'pasture_pm':       pasturepmdeaths,
+    }
+    func = switch.get(lu, lambda: "")
+    return func(scenario, aqm, cr)
+
+ag_nox_base                 = deaths_sens('ag_nox','nlcd')
+ag_nh3_base                 = deaths_sens('ag_nh3','nlcd')
+ag_other_base               = deaths_sens('ag_other','nlcd')
+ag_pm_base                  = deaths_sens('ag_pm', 'nlcd')
+ag_voc_base                 = deaths_sens('ag_voc', 'nlcd')
+forest_base                 = deaths_sens('forest','nlcd')
+pasture_nox_base            = deaths_sens('pasture_nox','nlcd')
+pasture_nh3_base            = deaths_sens('pasture_nh3','nlcd')
+pasture_other_base          = deaths_sens('pasture_other','nlcd')
+pasture_pm_base             = deaths_sens('pasture_pm','nlcd')
+
+tot_nox_base                = ag_nox_base + pasture_nox_base
+tot_nh3_base                = ag_nh3_base + pasture_nh3_base
+tot_other_base              = ag_pm_base + ag_voc_base + forest_base + pasture_other_base + pasture_pm_base
+
+# Change in deaths relative to 2001
+scenarios               = ["forest", "native", "proag", "ref", "urban"]
+#for x in scenarios:
+#    change              = deaths('ag', x) + deaths('forest', x) + deaths('pasture', x) - tot_base
+#    print(x, change)
+
+#print(totfactor)        # 22.850534376808614
+#print(totfactor_nox)    # 10.148278341501431
+#print(totfactor_nh3)    # 8.004808365566706
+
+# We also want to take into account the trend in changes in background pollution:
+
+def get_tot_factor_dep(sens,tf):
+    totfactor = 0.0
+    count = 0
+    while (count < horizon):
+        totfactor = totfactor + pow(discountf,count) * cessation[count] * sens[count] * tf[count]
+        count = count + 1
+    return totfactor
+
+pm_dep_profile          = get_sensitivity(0.0246306407730926)
+dep_totfactor_pm        = get_tot_factor_sens(pm_dep_profile)
+nox_dep_profile         = get_sensitivity(0.0228851659674423)
+dep_totfactor_nox       = get_tot_factor_dep(nox_dep_profile, nox_sensitivity)
+sox_dep_profile         = get_sensitivity(0.0918885856004334)
+dep_totfactor_sox       = get_tot_factor_dep(sox_dep_profile, sox_sensitivity)
+#dep_totfactor_sox       = get_tot_factor_sens(sox_dep_profile)
+
+
+#print("Sensitivity: dep_totfactors")
+#print(dep_totfactor_pm)
+#print(dep_totfactor_nox)
+#print(dep_totfactor_sox)
+
+'''
+print("Sensitivity: Changing deposition via sensitivity and reduction in background pollution")
+rows                    = []
+for x in scenarios:
+    # air quality cost
+    change_nox              = (deaths_sens('ag_nox', x) + deaths_sens('pasture_nox', x) - tot_nox_base) * (-1.0 * vsl * totfactor_nox / onebillion) - ((deposition('nox', x)).sum() * dep_totfactor_nox * -1.0 * vsl / onebillion)
+    change_nh3              = (deaths_sens('ag_nh3', x) + deaths_sens('pasture_nh3', x) - tot_nh3_base) * -1.0 * vsl * totfactor_nh3 / onebillion
+    change_sox              =  (deposition('sox', x)).sum()  * vsl * dep_totfactor_sox / onebillion
+    change_other              = (deaths_sens('pasture_other', x) + deaths_sens('ag_other', x) + deaths_sens('forest', x) - tot_other_base) * (-1.0 * vsl * totfactor / onebillion) - ((deposition('pm25', x)).sum() * (-1.0 * vsl * dep_totfactor_pm / onebillion))
+#    change = change_nox
+    change = change_nox + change_nh3 + change_other + change_sox
+    rows.append([x,change])
+print(rows)
+'''
+'''
+print("Sensitivity: Changing deposition only via sensitivity")
+rows                    = []
+for x in scenarios:
+    # air quality cost
+    change_nox              = (deaths_sens('ag_nox', x) + deaths_sens('pasture_nox', x) - tot_nox_base) * (-1.0 * vsl * totfactor_nox / onebillion) - ((deposition('nox', x)).sum() * totfactor_nox * -1.0 * vsl / onebillion)
+    change_nh3              = (deaths_sens('ag_nh3', x) + deaths_sens('pasture_nh3', x) - tot_nh3_base) * -1.0 * vsl * totfactor_nh3 / onebillion
+    change_sox              =  (deposition('sox', x)).sum()  * vsl * totfactor_sox / onebillion
+    change_other              = (deaths_sens('pasture_other', x) + deaths_sens('ag_other', x) + deaths_sens('forest', x) - tot_other_base) * (-1.0 * vsl * totfactor / onebillion) - ((deposition('pm25', x)).sum() * (-1.0 * vsl * totfactor / onebillion))
+#    change = change_nox
+    change = change_nox + change_nh3 + change_other + change_sox
+    rows.append([x,change])
+print(rows)
+'''
+
+#########################################################################
+########################## DEATHS BY POLLUTANT ##########################
+#########################################################################
+
+# For each scenario, we also want to print deaths by pollutant, for both
+# the main results and the sensitivity. 
+
+#1. Sensitivity results by pollutant
+'''
+print("Sensitivity results by pollutant (including deposition change)")
+print("PM2.5")
+rows                    = []
+for x in scenarios:
+    change = (deaths_sens('ag_pm', x) + deaths_sens('pasture_pm', x) - ag_pm_base - pasture_pm_base) * (-1.0 * vsl * totfactor / onebillion) - (deposition('pm25', x).sum() * (-1.0 * vsl * dep_totfactor_pm / onebillion))
+    rows.append([x,change])
+print(rows)
+
+print("VOC")
+rows                    = []
+for x in scenarios:
+    change = (deaths_sens('ag_voc', x) + deaths_sens('pasture_other', x) + deaths_sens('forest', x) - ag_voc_base - pasture_other_base - forest_base) * (-1.0 * vsl * totfactor / onebillion)
+    rows.append([x,change])
+print(rows)
+
+print("NOx")
+rows                    = []
+for x in scenarios:
+    change = (deaths_sens('ag_nox', x) + deaths_sens('pasture_nox', x) - ag_nox_base - pasture_nox_base) * (-1.0 * vsl * totfactor_nox / onebillion) - (deposition('nox', x).sum() * (-1.0 * vsl * dep_totfactor_nox / onebillion))
+    rows.append([x,change])
+print(rows)
+
+print("NH3")
+rows                    = []
+for x in scenarios:
+    change = (deaths_sens('ag_nh3', x) + deaths_sens('pasture_nh3', x) - ag_nh3_base - pasture_nh3_base) * (-1.0 * vsl * totfactor_nh3 / onebillion)
+    rows.append([x,change])
+print(rows)
+
+print("SOx")
+rows                    = []
+for x in scenarios:
+    change = (deposition('sox', x).sum() * (vsl * dep_totfactor_sox / onebillion))
+    rows.append([x,change])
+print(rows)
+'''
+#2. Main results by pollutant
+'''
+print("Main results by pollutant")
+print("PM2.5")
+rows                    = []
+for x in scenarios:
+    change = (deaths_sens('ag_pm', x) + deaths_sens('pasture_pm', x) - ag_pm_base - pasture_pm_base) * (-1.0 * vsl * totfactor / onebillion) - (deposition('pm25', x).sum() * (-1.0 * vsl * totfactor / onebillion))
+    rows.append([x,change])
+print(rows)
+
+print("VOC")
+rows                    = []
+for x in scenarios:
+    change = (deaths_sens('ag_voc', x) + deaths_sens('pasture_other', x) + deaths_sens('forest', x) - ag_voc_base - pasture_other_base - forest_base) * (-1.0 * vsl * totfactor / onebillion)
+    rows.append([x,change])
+print(rows)
+
+print("NOx")
+rows                    = []
+for x in scenarios:
+    change = (deaths_sens('ag_nox', x) + deaths_sens('pasture_nox', x) - ag_nox_base - pasture_nox_base) * (-1.0 * vsl * totfactor / onebillion) - (deposition('nox', x).sum() * (-1.0 * vsl * totfactor / onebillion))
+    rows.append([x,change])
+print(rows)
+
+print("NH3")
+rows                    = []
+for x in scenarios:
+    change = (deaths_sens('ag_nh3', x) + deaths_sens('pasture_nh3', x) - ag_nh3_base - pasture_nh3_base) * (-1.0 * vsl * totfactor / onebillion)
+    rows.append([x,change])
+print(rows)
+
+print("SOx")
+rows                    = []
+for x in scenarios:
+    change = (deposition('sox', x).sum() * (vsl * totfactor / onebillion))
+    rows.append([x,change])
+print(rows)
+'''
+#########################################################################
+################################ OUTPUTS ################################
 #########################################################################
 #import geopandas as gpd
 #import matplotlib.pyplot as plt
@@ -693,7 +1134,7 @@ def forestdeaths_perkm(model, crf):
     resultvoc            = vocd['Forest'] * vocd['mortality']
     return resultvoc
 
-fdpkm                   = pd.DataFrame(forestdeaths_perkm('InMAP', 'gemm'), columns = ['forestdeaths'])
+fdpkm                   = pd.DataFrame(forestdeaths_perkm(aqm, cr), columns = ['forestdeaths'])
 fdpkm['FIPS']           = bvoc['FIPS']
 #fdpkm.to_csv("forestdeaths.csv")
 
@@ -724,11 +1165,11 @@ def deposition_perkm(pol):
             'sox':   getsoxdep_perkm
     }
     func = switch.get(pol, lambda: "")
-    return func('InMAP', 'gemm')
+    return func(aqm, cr)
 
 totdep                  = deposition_perkm('pm25') + deposition_perkm('nox') + deposition_perkm('sox')
 totdepdf                = pd.DataFrame(totdep, columns = ['totdep'])
-pmd                     = isrm[(isrm.pollutant == 'so2') & (isrm.model == 'InMAP') & (isrm.crf == 'gemm')].reset_index()
+pmd                     = isrm[(isrm.pollutant == 'so2') & (isrm.model == aqm) & (isrm.crf == cr)].reset_index()
 pmd                     = pd.DataFrame(pmd['FIPS'], columns = ['FIPS'])
 totdepdf['FIPS']        = pmd['FIPS']
 
@@ -742,6 +1183,10 @@ def agdeaths_perkm(model, crf):
     pmd                 = isrm[(isrm.pollutant == 'pm25') & (isrm.model == model) & (isrm.crf == crf)].reset_index()
     pmd                 = pd.merge(pixels, pmd, on='FIPS', how='left')
     resultpm            = pmd['dust-emis'] * pmd['mortality']
+    # From Windblownust
+    wbd                 = isrm[(isrm.pollutant == 'pm25') & (isrm.model == model) & (isrm.crf == crf)]
+    wbd                 = pd.merge(pixels, wbd, on='FIPS',how='left')
+    resultwb            = wbdust['Agricultural'] * wbd['mortality']
     # From NOx
     noxd                = isrm[(isrm.pollutant == 'nox') & (isrm.model == model) & (isrm.crf == crf)].reset_index()
     noxd                = pd.merge(pixels, noxd, on='FIPS', how='left')
@@ -751,12 +1196,17 @@ def agdeaths_perkm(model, crf):
     nh3d                = pd.merge(pixels, nh3d, on='FIPS', how='left')
     resultnh3           = nh3d['nh3-emis'] * nh3d['mortality']
     # From VOC
+    vocd                = isrm[(isrm.pollutant == 'voc') & (isrm.model == model) & (isrm.crf == crf)]
+    vocd                = pd.merge(pixels, vocd, on='FIPS', how='left')
+    bvoc['Ag']          = bvoc['Ag'].replace(np.nan, bvoc['Ag'].mean())
+    vocd                = pd.merge(vocd, bvoc, on='FIPS', how='left')
+    resultvoc           =  vocd['Ag'] * vocd['mortality']
 #    vocd                = isrm[(isrm.pollutant == 'voc') & (isrm.model == model) & (isrm.crf == crf)]
 #    vocd                = pd.merge(pixels, vocd, on='FIPS')
 #    resultvoc           = cropvoc * vocd['mortality']
-    return resultpm + resultnox + resultnh3
+    return resultpm + resultnox + resultnh3 + resultwb + resultvoc
 
-agd                     = pd.DataFrame(agdeaths_perkm('InMAP', 'gemm'), columns = ['agdeaths'])
+agd                     = pd.DataFrame(agdeaths_perkm(aqm, cr), columns = ['agdeaths'])
 agd['FIPS']             = pixels['FIPS']
 
 # Deaths from 1km conversion from forest to ag
@@ -767,16 +1217,3 @@ forest_to_ag['total']   = forest_to_ag['total'] * -1.0 * vsl
 forest_to_ag['conv']    = forest_to_ag['agdeaths'] - forest_to_ag['total']
 
 forest_to_ag.to_csv("./outputs/deathsperkm.csv")
-
-#vmin, vmax          = -0.1,0.1
-
-#geo_df              = gpd.read_file("./plots/tl_2014_us_county/tl_2014_us_county.shp")
-#geo_df              = geo_df.rename(columns={'GEOID': 'FIPS'})
-#otherstates         = ["02","15","60","66","69","72","78"]
-#geo_df              = geo_df[~geo_df.STATEFP.isin(otherstates)]
-
-#geo_df.FIPS = geo_df.FIPS.astype(int)
-#geo_df              = pd.merge(geo_df, forest_aq, on='FIPS')
-#fig                 = geo_df.plot(column='total', vmin=vmin, vmax=vmax, legend=True)
-#plt.show()
-#plt.savefig('./plots/agdeaths.png')
